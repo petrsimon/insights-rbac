@@ -52,3 +52,12 @@ class GroupHasRoleBindingsError(GroupV2Error):
             f"Group is referenced by {binding_count} active role binding(s). "
             "Remove the group from all role bindings before deleting it."
         )
+
+
+class PrincipalNotFoundError(GroupV2Error):
+    """Raised when one or more requested principal identifiers could not be resolved."""
+
+    def __init__(self, identifiers: list[str]):
+        """Initialize with the identifiers (usernames or service account client IDs) that were not found."""
+        self.identifiers = identifiers
+        super().__init__(f"Principal(s) not found: {', '.join(sorted(identifiers))}.")

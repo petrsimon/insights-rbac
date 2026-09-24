@@ -17,13 +17,19 @@
 """Service layer for GroupV2."""
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, ProtectedError, Q, QuerySet
 from management.group.model import Group
 from management.group.relation_api_dual_write_group_handler import RelationApiDualWriteGroupHandler
-from management.group.v2_exceptions import GroupAlreadyExistsError, GroupHasRoleBindingsError, ProtectedGroupError
+from management.group.v2_exceptions import (
+    GroupAlreadyExistsError,
+    GroupHasRoleBindingsError,
+    PrincipalNotFoundError,
+    ProtectedGroupError,
+)
 from management.principal.model import Principal
 from management.relation_replicator.relation_replicator import ReplicationEventType
 from management.role.model import Role
@@ -139,6 +145,107 @@ class GroupV2Service:
             raise GroupHasRoleBindingsError(len(e.protected_objects))
 
         dual_write_handler.replicate_removed_principals(principals)
+
+    def list_principals(self, group: Group, params: dict) -> QuerySet:
+        """List a group's member principals, annotated with group_count, filtered by the given params."""
+        queryset = group.principals.filter(tenant=self.tenant).annotate(
+            group_count=Count("group", filter=Q(group__tenant=F("tenant")), distinct=True)
+        )
+
+        service_account_client_ids = params.get("service_account_client_ids")
+        if service_account_client_ids:
+            return queryset.filter(
+                type=Principal.Types.SERVICE_ACCOUNT, service_account_id__in=service_account_client_ids
+            ).order_by("username", "uuid")
+
+        principal_type = params.get("principal_type") or Principal.Types.USER
+        if principal_type != "all":
+            queryset = queryset.filter(type=principal_type)
+
+        for field in ("username", "principal_username"):
+            value = params.get(field)
+            if value:
+                queryset = v2_name_filter(queryset, value, field="username")
+
+        # service_account_name/service_account_description have no local column to filter on (no display_name or
+        # description stored for service accounts); degrade to matching on username, scoped to service accounts only
+        # so these filters never match regular user principals.
+        for field in ("service_account_name", "service_account_description"):
+            value = params.get(field)
+            if value:
+                queryset = v2_name_filter(
+                    queryset.filter(type=Principal.Types.SERVICE_ACCOUNT), value, field="username"
+                )
+
+        # username_only and admin_only are accepted (see GroupV2ListPrincipalsInputSerializer help_text) but
+        # intentionally not read here: this endpoint never enriches from external identity services, so
+        # username_only is always satisfied by construction, and admin_only has no local Principal column to
+        # filter on.
+        order_by = params.get("order_by") or "username"
+        return queryset.order_by(order_by, "uuid")
+
+    def add_principals(self, group: Group, usernames: set, service_account_client_ids: set) -> List[Principal]:
+        """Add principals to a group, resolved from RBAC's local Principal table only."""
+        self._check_not_protected(group, self.PROTECTED_FLAGS_FOR_UPDATE, "modified")
+
+        principals = self._resolve_principals(usernames, service_account_client_ids)
+        group.principals.add(*principals)
+        return principals
+
+    def remove_principals(self, group: Group, usernames: set, service_account_client_ids: set) -> List[Principal]:
+        """Remove principals from a group. All identifiers must currently be members, or nothing is removed."""
+        self._check_not_protected(group, self.PROTECTED_FLAGS_FOR_UPDATE, "modified")
+
+        principals = self._resolve_member_principals(group, usernames, service_account_client_ids)
+        group.principals.remove(*principals)
+        return principals
+
+    def remove_principal(self, group: Group, principal_uuid) -> Principal:
+        """Remove a single principal from a group by principal UUID."""
+        self._check_not_protected(group, self.PROTECTED_FLAGS_FOR_UPDATE, "modified")
+
+        try:
+            principal = group.principals.filter(tenant=self.tenant, uuid=principal_uuid).first()
+        except (DjangoValidationError, ValueError):
+            principal = None
+        if principal is None:
+            raise PrincipalNotFoundError([str(principal_uuid)])
+
+        group.principals.remove(principal)
+        return principal
+
+    def _resolve_principals(self, usernames: set, service_account_client_ids: set) -> List[Principal]:
+        """Resolve usernames/service account client IDs against all tenant principals."""
+        return self._resolve(Principal.objects.filter(tenant=self.tenant), usernames, service_account_client_ids)
+
+    def _resolve_member_principals(
+        self, group: Group, usernames: set, service_account_client_ids: set
+    ) -> List[Principal]:
+        """Resolve usernames/service account client IDs against the group's current members only."""
+        return self._resolve(group.principals.filter(tenant=self.tenant), usernames, service_account_client_ids)
+
+    @staticmethod
+    def _resolve(queryset: QuerySet, usernames: set, service_account_client_ids: set) -> List[Principal]:
+        principals = []
+        missing = []
+
+        if usernames:
+            found = list(queryset.filter(type=Principal.Types.USER, username__in=usernames))
+            missing.extend(usernames - {p.username for p in found})
+            principals.extend(found)
+
+        if service_account_client_ids:
+            found_sa = list(
+                queryset.filter(
+                    type=Principal.Types.SERVICE_ACCOUNT, service_account_id__in=service_account_client_ids
+                )
+            )
+            missing.extend(service_account_client_ids - {p.service_account_id for p in found_sa})
+            principals.extend(found_sa)
+
+        if missing:
+            raise PrincipalNotFoundError(missing)
+        return principals
 
     def _ordering(self, order_by: str) -> tuple[str, ...]:
         """Translate an API order_by value into ORM ordering, with a stable name/uuid tiebreaker."""
