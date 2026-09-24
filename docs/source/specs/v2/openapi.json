@@ -637,7 +637,7 @@
             "name": "username_only",
             "in": "query",
             "required": false,
-            "description": "When true, return only usernames without enrichment from external identity services. Applies to user principals only.",
+            "description": "When true, return only usernames without enrichment from external identity services. Applies to user principals only. Accepted for API compatibility; this endpoint never enriches from external identity services, so the flag is always effectively satisfied.",
             "schema": {
               "type": "boolean",
               "default": false
@@ -648,7 +648,7 @@
             "name": "admin_only",
             "in": "query",
             "required": false,
-            "description": "When true, return only org admin users. Applies to user principals only.",
+            "description": "When true, return only org admin users. Applies to user principals only. Not yet implemented: org-admin status requires a BOP/IT lookup not available to this endpoint's local-only lookups; the flag is currently accepted but has no filtering effect.",
             "schema": {
               "type": "boolean",
               "default": false

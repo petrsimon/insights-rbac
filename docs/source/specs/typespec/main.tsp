@@ -2132,9 +2132,9 @@ namespace Groups {
         @query username?: string;
         @doc("Filter by principal username (case-insensitive substring match). Applies to both user and service-account principals.")
         @query principal_username?: string;
-        @doc("When true, return only usernames without enrichment from external identity services. Applies to user principals only.")
+        @doc("When true, return only usernames without enrichment from external identity services. Applies to user principals only. Accepted for API compatibility; this endpoint never enriches from external identity services, so the flag is always effectively satisfied.")
         @query username_only?: boolean = false;
-        @doc("When true, return only org admin users. Applies to user principals only.")
+        @doc("When true, return only org admin users. Applies to user principals only. Not yet implemented: org-admin status requires a BOP/IT lookup not available to this endpoint's local-only lookups; the flag is currently accepted but has no filtering effect.")
         @query admin_only?: boolean = false;
         @doc("Filter service accounts by display name (substring match). Only used when principal_type is 'service-account' or 'all'.")
         @query service_account_name?: string;

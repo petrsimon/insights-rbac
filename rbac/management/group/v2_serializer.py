@@ -107,3 +107,131 @@ class GroupV2ListInputSerializer(serializers.Serializer):
                 f"Invalid order_by value '{value}'. Valid values: {', '.join(sorted(VALID_ORDER_BY_FIELDS))}"
             )
         return value
+
+
+def _parse_csv_set(value: str) -> set:
+    """Parse a comma-separated string into a set of stripped, non-empty values."""
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+class GroupV2AddPrincipalsInputSerializer(serializers.Serializer):
+    """Input serializer for adding principals to a group. At least one field must contain items."""
+
+    usernames = serializers.ListField(
+        child=serializers.CharField(min_length=1), min_length=1, required=False, help_text="Usernames to add."
+    )
+    service_accounts = serializers.ListField(
+        child=serializers.CharField(min_length=1),
+        min_length=1,
+        required=False,
+        help_text="Service account client IDs to add.",
+    )
+
+    def validate_usernames(self, value):
+        """Normalize usernames to lower case, matching how they are stored on Principal."""
+        return [username.lower() for username in value]
+
+    def validate(self, data):
+        """Require at least one of usernames or service_accounts to be present."""
+        if not data.get("usernames") and not data.get("service_accounts"):
+            raise serializers.ValidationError("At least one of usernames or service_accounts must contain items.")
+        return data
+
+
+class GroupV2ListPrincipalsInputSerializer(serializers.Serializer):
+    """Input serializer for listing a group's member principals."""
+
+    VALID_PRINCIPAL_TYPES = ("user", "service-account", "all")
+    VALID_ORDER_BY_FIELDS = {"username", "-username"}
+
+    principal_type = serializers.ChoiceField(
+        choices=VALID_PRINCIPAL_TYPES,
+        required=False,
+        allow_blank=True,
+        help_text="Filter by principal type: 'user' (default), 'service-account', or 'all'.",
+    )
+    username = serializers.CharField(required=False, allow_blank=True)
+    principal_username = serializers.CharField(required=False, allow_blank=True)
+    username_only = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text=(
+            "Accepted for API compatibility with the V1 endpoint. This service performs pure local "
+            "Principal-table lookups with no external identity-service enrichment, so the response never "
+            "contains enriched fields regardless of this flag -- it is always effectively satisfied."
+        ),
+    )
+    admin_only = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text=(
+            "NOT YET IMPLEMENTED: org-admin status is not stored on the local Principal model and "
+            "determining it requires a BOP/IT lookup, which is out of scope for this pure-local-lookup "
+            "endpoint. This flag is currently accepted but has no filtering effect."
+        ),
+    )
+    service_account_name = serializers.CharField(required=False, allow_blank=True)
+    service_account_description = serializers.CharField(required=False, allow_blank=True)
+    service_account_client_ids = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Comma-separated service account client IDs. Incompatible with any other filter parameter.",
+    )
+    order_by = serializers.CharField(required=False, allow_blank=True)
+
+    validate_username = staticmethod(normalize_blank_or_none)
+    validate_principal_username = staticmethod(normalize_blank_or_none)
+    validate_service_account_name = staticmethod(normalize_blank_or_none)
+    validate_service_account_description = staticmethod(normalize_blank_or_none)
+
+    def validate_principal_type(self, value):
+        """Fall back to 'user' when omitted or blank."""
+        return value or "user"
+
+    def validate_service_account_client_ids(self, value):
+        """Parse the comma-separated client IDs; return None when no IDs remain."""
+        return _parse_csv_set(value) or None
+
+    def validate_order_by(self, value):
+        """Reject order_by values outside the allowed set; a blank value falls back to the default."""
+        if not value:
+            return "username"
+        if value not in self.VALID_ORDER_BY_FIELDS:
+            valid_values = ", ".join(sorted(self.VALID_ORDER_BY_FIELDS))
+            raise serializers.ValidationError(f"Invalid order_by value '{value}'. Valid values: {valid_values}")
+        return value
+
+    def validate(self, data):
+        """service_account_client_ids is incompatible with any other filter parameter."""
+        if data.get("service_account_client_ids"):
+            other_keys = set(self.initial_data.keys()) - {"service_account_client_ids", "limit", "offset"}
+            if other_keys:
+                raise serializers.ValidationError(
+                    "service_account_client_ids is incompatible with any other query parameter."
+                )
+        return data
+
+
+class GroupV2RemovePrincipalsInputSerializer(serializers.Serializer):
+    """Input serializer for bulk-removing principals from a group via query parameters."""
+
+    usernames = serializers.CharField(
+        required=False, allow_blank=True, help_text="Comma-separated usernames to remove."
+    )
+    service_accounts = serializers.CharField(
+        required=False, allow_blank=True, help_text="Comma-separated service account client IDs to remove."
+    )
+
+    def validate_usernames(self, value):
+        """Parse the comma-separated usernames, normalized to lower case."""
+        return {username.lower() for username in _parse_csv_set(value)}
+
+    def validate_service_accounts(self, value):
+        """Parse the comma-separated service account client IDs."""
+        return _parse_csv_set(value)
+
+    def validate(self, data):
+        """Require at least one of usernames or service_accounts to be present."""
+        if not data.get("usernames") and not data.get("service_accounts"):
+            raise serializers.ValidationError("At least one of usernames or service_accounts must be provided.")
+        return data
