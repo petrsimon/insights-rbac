@@ -746,6 +746,13 @@ class GroupV2ListPrincipalsViewTest(GroupV2ViewTestBase):
 
         self.assertEqual(self._usernames(response), ["service-account-abc"])
 
+    def test_list_service_account_name_ignored_when_principal_type_defaults_to_user(self):
+        """service_account_name is a documented no-op when principal_type defaults to 'user', not a zeroing filter."""
+        response = self._list_principals(self.group_a.uuid, service_account_name="anything")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2"])
+
     def test_list_filter_by_service_account_client_ids(self):
         """service_account_client_ids matches membership by client ID."""
         response = self._list_principals(self.group_a.uuid, service_account_client_ids="abc,nonexistent")
@@ -764,6 +771,15 @@ class GroupV2ListPrincipalsViewTest(GroupV2ViewTestBase):
         response = self._list_principals(self.group_b.uuid)
 
         self.assertEqual(self._usernames(response), ["user_1"])
+
+    def test_list_excludes_cross_account_principals(self):
+        """Cross-account principals are synthetic and never returned, even if a member of the group."""
+        cross_account = Principal.objects.create(username="cross-account-user", cross_account=True, tenant=self.tenant)
+        self.group_a.principals.add(cross_account)
+
+        response = self._list_principals(self.group_a.uuid)
+
+        self.assertCountEqual(self._usernames(response), ["user_1", "user_2"])
 
     def test_list_uses_offset_pagination(self):
         """The list response uses offset pagination meta."""
@@ -906,6 +922,14 @@ class GroupV2AddPrincipalsViewTest(GroupV2ViewTestBase):
     def test_add_group_not_found(self):
         """Adding principals to an unknown group returns 404."""
         response = self._add(uuid.uuid4(), {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_add_cross_account_principal_not_found(self):
+        """A cross-account principal is not resolvable through this local-lookup endpoint."""
+        Principal.objects.create(username="cross-account-user", cross_account=True, tenant=self.tenant)
+
+        response = self._add(self.group_b.uuid, {"usernames": ["cross-account-user"]})
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 

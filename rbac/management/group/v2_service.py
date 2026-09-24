@@ -148,8 +148,10 @@ class GroupV2Service:
 
     def list_principals(self, group: Group, params: dict) -> QuerySet:
         """List a group's member principals, annotated with group_count, filtered by the given params."""
-        queryset = group.principals.filter(tenant=self.tenant).annotate(
-            group_count=Count("group", filter=Q(group__tenant=F("tenant")), distinct=True)
+        queryset = (
+            group.principals.filter(tenant=self.tenant)
+            .exclude(cross_account=True)
+            .annotate(group_count=Count("group", filter=Q(group__tenant=F("tenant")), distinct=True))
         )
 
         service_account_client_ids = params.get("service_account_client_ids")
@@ -167,15 +169,20 @@ class GroupV2Service:
             if value:
                 queryset = v2_name_filter(queryset, value, field="username")
 
-        # service_account_name/service_account_description have no local column to filter on (no display_name or
-        # description stored for service accounts); degrade to matching on username, scoped to service accounts only
-        # so these filters never match regular user principals.
-        for field in ("service_account_name", "service_account_description"):
-            value = params.get(field)
-            if value:
-                queryset = v2_name_filter(
-                    queryset.filter(type=Principal.Types.SERVICE_ACCOUNT), value, field="username"
-                )
+        # service_account_name/service_account_description only apply when principal_type is 'service-account'
+        # or 'all' (per the TypeSpec contract); with principal_type='user' the queryset is already narrowed to
+        # users, so applying a type=service-account filter on top would always yield zero rows. Skip them
+        # instead, matching the documented no-op behavior for that case.
+        if principal_type != Principal.Types.USER:
+            # service_account_name/service_account_description have no local column to filter on (no display_name
+            # or description stored for service accounts); degrade to matching on username, scoped to service
+            # accounts only so these filters never match regular user principals.
+            for field in ("service_account_name", "service_account_description"):
+                value = params.get(field)
+                if value:
+                    queryset = v2_name_filter(
+                        queryset.filter(type=Principal.Types.SERVICE_ACCOUNT), value, field="username"
+                    )
 
         # username_only and admin_only are accepted (see GroupV2ListPrincipalsInputSerializer help_text) but
         # intentionally not read here: this endpoint never enriches from external identity services, so
@@ -205,7 +212,9 @@ class GroupV2Service:
         self._check_not_protected(group, self.PROTECTED_FLAGS_FOR_UPDATE, "modified")
 
         try:
-            principal = group.principals.filter(tenant=self.tenant, uuid=principal_uuid).first()
+            principal = (
+                group.principals.filter(tenant=self.tenant, uuid=principal_uuid).exclude(cross_account=True).first()
+            )
         except (DjangoValidationError, ValueError):
             principal = None
         if principal is None:
@@ -216,13 +225,21 @@ class GroupV2Service:
 
     def _resolve_principals(self, usernames: set, service_account_client_ids: set) -> List[Principal]:
         """Resolve usernames/service account client IDs against all tenant principals."""
-        return self._resolve(Principal.objects.filter(tenant=self.tenant), usernames, service_account_client_ids)
+        return self._resolve(
+            Principal.objects.filter(tenant=self.tenant).exclude(cross_account=True),
+            usernames,
+            service_account_client_ids,
+        )
 
     def _resolve_member_principals(
         self, group: Group, usernames: set, service_account_client_ids: set
     ) -> List[Principal]:
         """Resolve usernames/service account client IDs against the group's current members only."""
-        return self._resolve(group.principals.filter(tenant=self.tenant), usernames, service_account_client_ids)
+        return self._resolve(
+            group.principals.filter(tenant=self.tenant).exclude(cross_account=True),
+            usernames,
+            service_account_client_ids,
+        )
 
     @staticmethod
     def _resolve(queryset: QuerySet, usernames: set, service_account_client_ids: set) -> List[Principal]:
