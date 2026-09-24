@@ -897,7 +897,7 @@
             "name": "usernames",
             "in": "query",
             "required": false,
-            "description": "Comma-separated usernames to remove from the group",
+            "description": "Comma-separated usernames to remove from the group. At most 100.",
             "schema": {
               "type": "string"
             },
@@ -907,7 +907,7 @@
             "name": "service_accounts",
             "in": "query",
             "required": false,
-            "description": "Comma-separated service account client IDs to remove from the group",
+            "description": "Comma-separated service account client IDs to remove from the group. At most 100.",
             "schema": {
               "type": "string"
             },
@@ -4276,7 +4276,8 @@
               "type": "string"
             },
             "minItems": 1,
-            "description": "Usernames to add."
+            "maxItems": 100,
+            "description": "Usernames to add. At most 100."
           },
           "service_accounts": {
             "type": "array",
@@ -4284,7 +4285,8 @@
               "type": "string"
             },
             "minItems": 1,
-            "description": "Service account client IDs to add. Must contain at least one item.",
+            "maxItems": 100,
+            "description": "Service account client IDs to add. Must contain at least one item, and at most 100.",
             "example": [
               "abc-123-def"
             ]
@@ -4304,7 +4306,8 @@
               "type": "string"
             },
             "minItems": 1,
-            "description": "Usernames to add. Must contain at least one item."
+            "maxItems": 100,
+            "description": "Usernames to add. Must contain at least one item, and at most 100."
           },
           "service_accounts": {
             "type": "array",
@@ -4312,7 +4315,8 @@
               "type": "string"
             },
             "minItems": 1,
-            "description": "Service account client IDs to add.",
+            "maxItems": 100,
+            "description": "Service account client IDs to add. At most 100.",
             "example": [
               "abc-123-def"
             ]

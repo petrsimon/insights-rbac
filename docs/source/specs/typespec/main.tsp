@@ -2149,23 +2149,27 @@ namespace Groups {
 
     @doc("Add principals by username. service_accounts may also be supplied.")
     model AddUsernamesInput {
-        @doc("Usernames to add. Must contain at least one item.")
+        @doc("Usernames to add. Must contain at least one item, and at most 100.")
         @minItems(1)
+        @maxItems(100)
         usernames: string[];
-        @doc("Service account client IDs to add.")
+        @doc("Service account client IDs to add. At most 100.")
         @example(#["abc-123-def"])
         @minItems(1)
+        @maxItems(100)
         service_accounts?: string[];
     }
 
     @doc("Add principals by service account client ID. usernames may also be supplied.")
     model AddServiceAccountsInput {
-        @doc("Usernames to add.")
+        @doc("Usernames to add. At most 100.")
         @minItems(1)
+        @maxItems(100)
         usernames?: string[];
-        @doc("Service account client IDs to add. Must contain at least one item.")
+        @doc("Service account client IDs to add. Must contain at least one item, and at most 100.")
         @example(#["abc-123-def"])
         @minItems(1)
+        @maxItems(100)
         service_accounts: string[];
     }
 
@@ -2196,9 +2200,9 @@ namespace Groups {
     @summary("Remove principals from a group in bulk")
     @delete op removePrincipals(
         @path uuid: UUID;
-        @doc("Comma-separated usernames to remove from the group")
+        @doc("Comma-separated usernames to remove from the group. At most 100.")
         @query usernames?: string;
-        @doc("Comma-separated service account client IDs to remove from the group")
+        @doc("Comma-separated service account client IDs to remove from the group. At most 100.")
         @query service_accounts?: string;
     ): NoContentResponse | Problems.CommonProblems | Problems.Problem404;
 }

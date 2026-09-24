@@ -25,6 +25,7 @@ from rest_framework import serializers
 
 RESERVED_GROUP_NAMES = {"custom default access", "default access"}
 VALID_ORDER_BY_FIELDS = {prefix + field for field in GroupV2Service.ORDER_BY_FIELD_MAPPING for prefix in ("", "-")}
+MAX_BULK_PRINCIPALS = 100
 
 
 class GroupV2ResponseSerializer(serializers.ModelSerializer):
@@ -118,13 +119,18 @@ class GroupV2AddPrincipalsInputSerializer(serializers.Serializer):
     """Input serializer for adding principals to a group. At least one field must contain items."""
 
     usernames = serializers.ListField(
-        child=serializers.CharField(min_length=1), min_length=1, required=False, help_text="Usernames to add."
+        child=serializers.CharField(min_length=1),
+        min_length=1,
+        max_length=MAX_BULK_PRINCIPALS,
+        required=False,
+        help_text=f"Usernames to add. Maximum {MAX_BULK_PRINCIPALS} per request.",
     )
     service_accounts = serializers.ListField(
         child=serializers.CharField(min_length=1),
         min_length=1,
+        max_length=MAX_BULK_PRINCIPALS,
         required=False,
-        help_text="Service account client IDs to add.",
+        help_text=f"Service account client IDs to add. Maximum {MAX_BULK_PRINCIPALS} per request.",
     )
 
     def validate_usernames(self, value):
@@ -224,11 +230,18 @@ class GroupV2RemovePrincipalsInputSerializer(serializers.Serializer):
 
     def validate_usernames(self, value):
         """Parse the comma-separated usernames, normalized to lower case."""
-        return {username.lower() for username in _parse_csv_set(value)}
+        return self._validate_csv_size({username.lower() for username in _parse_csv_set(value)})
 
     def validate_service_accounts(self, value):
         """Parse the comma-separated service account client IDs."""
-        return _parse_csv_set(value)
+        return self._validate_csv_size(_parse_csv_set(value))
+
+    @staticmethod
+    def _validate_csv_size(values: set) -> set:
+        """Reject a parsed CSV set larger than MAX_BULK_PRINCIPALS."""
+        if len(values) > MAX_BULK_PRINCIPALS:
+            raise serializers.ValidationError(f"A maximum of {MAX_BULK_PRINCIPALS} identifiers may be provided.")
+        return values
 
     def validate(self, data):
         """Require at least one of usernames or service_accounts to be present."""

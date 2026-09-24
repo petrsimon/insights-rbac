@@ -858,6 +858,12 @@ class GroupV2AddPrincipalsViewTest(GroupV2ViewTestBase):
                 response = self._add(self.group_b.uuid, body)
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_add_too_many_usernames_rejected(self):
+        """A request exceeding the maximum batch size is rejected at the serializer layer."""
+        response = self._add(self.group_b.uuid, {"usernames": [f"user_{i}" for i in range(101)]})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_add_unknown_username_not_found(self):
         """An unknown username returns 404 and adds nothing."""
         response = self._add(self.group_b.uuid, {"usernames": ["user_3", "no-such-user"]})
@@ -940,6 +946,14 @@ class GroupV2RemovePrincipalsBulkViewTest(GroupV2ViewTestBase):
     def test_remove_missing_query_params_rejected(self):
         """Neither usernames nor service_accounts is a 400."""
         response = self._remove(self.group_a.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_too_many_usernames_rejected(self):
+        """A request exceeding the maximum batch size is rejected at the serializer layer."""
+        usernames = ",".join(f"user_{i}" for i in range(101))
+
+        response = self._remove(self.group_a.uuid, usernames=usernames)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
