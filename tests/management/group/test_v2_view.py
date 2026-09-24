@@ -933,6 +933,16 @@ class GroupV2AddPrincipalsViewTest(GroupV2ViewTestBase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_add_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write_view.return_value.replicate_new_principals.side_effect = Exception("replication failed")
+        self.client.raise_request_exception = False
+
+        response = self._add(self.group_b.uuid, {"usernames": ["user_3"]})
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertFalse(self.group_b.principals.filter(pk=self.user_3.pk).exists())
+
 
 class GroupV2RemovePrincipalsBulkViewTest(GroupV2ViewTestBase):
     """Tests for bulk-removing principals from a group."""
@@ -994,6 +1004,27 @@ class GroupV2RemovePrincipalsBulkViewTest(GroupV2ViewTestBase):
         response = self._remove(self.group_b.uuid, usernames="user_2")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_remove_duplicate_usernames_deduplicated(self):
+        """Duplicate identifiers in the query params are resolved to a distinct set and removed exactly once."""
+        response = self._remove(self.group_a.uuid, usernames="user_1,user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+        removed = self.mock_dual_write_view.return_value.replicate_removed_principals.call_args.args[0]
+        self.assertEqual(len(removed), 1)
+
+    def test_remove_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write_view.return_value.replicate_removed_principals.side_effect = Exception(
+            "replication failed"
+        )
+        self.client.raise_request_exception = False
+
+        response = self._remove(self.group_a.uuid, usernames="user_1")
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
 
     def test_remove_system_group_rejected(self):
         """System groups cannot have principals removed."""
@@ -1079,6 +1110,18 @@ class GroupV2RemovePrincipalViewTest(GroupV2ViewTestBase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_write")
+        self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
+
+    def test_remove_principal_replication_failure_rolls_back_membership(self):
+        """A replication failure inside atomic_block() rolls back the M2M membership change."""
+        self.mock_dual_write_view.return_value.replicate_removed_principals.side_effect = Exception(
+            "replication failed"
+        )
+        self.client.raise_request_exception = False
+
+        response = self._remove(self.group_a.uuid, self.user_1.uuid)
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertTrue(self.group_a.principals.filter(pk=self.user_1.pk).exists())
 
 
