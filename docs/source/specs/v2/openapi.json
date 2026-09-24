@@ -58,9 +58,10 @@
             "name": "username",
             "in": "query",
             "required": false,
-            "description": "Filter groups that contain this username as a member",
+            "description": "Filter groups that contain this username as a member. Matches user principals only, not service accounts.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 150
             },
             "explode": false
           },
@@ -68,9 +69,10 @@
             "name": "exclude_username",
             "in": "query",
             "required": false,
-            "description": "Exclude groups that contain this username. Mutually exclusive with username.",
+            "description": "Exclude groups that contain this username. Matches user principals only, not service accounts. Mutually exclusive with username.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 150
             },
             "explode": false
           },
@@ -78,7 +80,7 @@
             "name": "role_names",
             "in": "query",
             "required": false,
-            "description": "Filter groups by comma-separated role names. Use role_discriminator to control match logic.",
+            "description": "Filter groups by comma-separated role names (maximum 50). Use role_discriminator to control match logic.",
             "schema": {
               "type": "string"
             },
@@ -103,7 +105,7 @@
             "name": "principals",
             "in": "query",
             "required": false,
-            "description": "Filter groups by comma-separated principal usernames. Returns groups that contain ALL specified principals.",
+            "description": "Filter groups by comma-separated principal usernames (maximum 50). Returns groups that contain ALL specified principals. Matches user principals only, not service accounts.",
             "schema": {
               "type": "string"
             },

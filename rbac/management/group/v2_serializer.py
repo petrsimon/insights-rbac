@@ -26,10 +26,22 @@ from rest_framework import serializers
 RESERVED_GROUP_NAMES = {"custom default access", "default access"}
 VALID_ORDER_BY_FIELDS = {prefix + field for field in GroupV2Service.ORDER_BY_FIELD_MAPPING for prefix in ("", "-")}
 
+# Each entry in role_names/principals produces a separate chained JOIN in GroupV2Service.list();
+# cap entry count to bound worst-case query cost.
+MAX_CSV_FILTER_ENTRIES = 50
+
 
 def _split_csv(value: str) -> list[str] | None:
     """Split a comma-separated value, ignoring blank entries. Returns None when no entries remain."""
     return [item for item in (v.strip() for v in value.split(",")) if item] or None
+
+
+def _split_csv_bounded(value: str) -> list[str] | None:
+    """Split a comma-separated value and reject more than MAX_CSV_FILTER_ENTRIES entries."""
+    items = _split_csv(value)
+    if items and len(items) > MAX_CSV_FILTER_ENTRIES:
+        raise serializers.ValidationError(f"A maximum of {MAX_CSV_FILTER_ENTRIES} comma-separated values is allowed.")
+    return items
 
 
 class GroupV2ResponseSerializer(serializers.ModelSerializer):
@@ -83,16 +95,19 @@ class GroupV2ListInputSerializer(serializers.Serializer):
     username = serializers.CharField(
         required=False,
         allow_blank=True,
+        max_length=150,
         help_text="Filter groups with a member username matching the value. Substring match; use * for globs.",
     )
     exclude_username = serializers.CharField(
         required=False,
         allow_blank=True,
+        max_length=150,
         help_text="Exclude groups with a member username containing the value. Mutually exclusive with username.",
     )
     role_names = serializers.CharField(
         required=False,
         allow_blank=True,
+        max_length=2000,
         help_text="Filter groups by comma-separated role names. Use role_discriminator to control match logic.",
     )
     role_discriminator = serializers.ChoiceField(
@@ -105,6 +120,7 @@ class GroupV2ListInputSerializer(serializers.Serializer):
     principals = serializers.CharField(
         required=False,
         allow_blank=True,
+        max_length=2000,
         help_text="Filter groups containing all of the comma-separated principal usernames.",
     )
     scope = serializers.ChoiceField(
@@ -126,8 +142,8 @@ class GroupV2ListInputSerializer(serializers.Serializer):
     validate_name = staticmethod(normalize_blank_or_none)
     validate_username = staticmethod(normalize_blank_or_none)
     validate_exclude_username = staticmethod(normalize_blank_or_none)
-    validate_role_names = staticmethod(_split_csv)
-    validate_principals = staticmethod(_split_csv)
+    validate_role_names = staticmethod(_split_csv_bounded)
+    validate_principals = staticmethod(_split_csv_bounded)
 
     def validate_role_discriminator(self, value):
         """Map a blank role_discriminator to the default."""

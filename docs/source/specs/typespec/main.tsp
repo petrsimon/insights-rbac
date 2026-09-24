@@ -2062,15 +2062,17 @@ namespace Groups {
         @query name?: string;
         @doc("Filter by group UUIDs")
         @query(#{explode: false}) uuid?: UUID[];
-        @doc("Filter groups that contain this username as a member")
+        @doc("Filter groups that contain this username as a member. Matches user principals only, not service accounts.")
+        @maxLength(150)
         @query username?: string;
-        @doc("Exclude groups that contain this username. Mutually exclusive with username.")
+        @doc("Exclude groups that contain this username. Matches user principals only, not service accounts. Mutually exclusive with username.")
+        @maxLength(150)
         @query exclude_username?: string;
-        @doc("Filter groups by comma-separated role names. Use role_discriminator to control match logic.")
+        @doc("Filter groups by comma-separated role names (maximum 50). Use role_discriminator to control match logic.")
         @query role_names?: string;
         @doc("Controls how role_names are matched: 'any' returns groups with at least one matching role; 'all' requires every role. Only used with role_names.")
         @query role_discriminator?: RoleDiscriminator = RoleDiscriminator.any;
-        @doc("Filter groups by comma-separated principal usernames. Returns groups that contain ALL specified principals.")
+        @doc("Filter groups by comma-separated principal usernames (maximum 50). Returns groups that contain ALL specified principals. Matches user principals only, not service accounts.")
         @query principals?: string;
         @doc("Scope filter: 'org_id' (default) returns all groups in the organization; 'principal' returns only groups the calling user belongs to.")
         @query scope?: GroupScope = GroupScope.org_id;
