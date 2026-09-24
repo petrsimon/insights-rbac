@@ -27,15 +27,19 @@ def _glob_to_regex(pattern: str) -> str:
     return "^" + ".*".join(re.escape(p) for p in parts) + "$"
 
 
-def v2_name_filter(queryset: QuerySet, name: str, field: str = "name") -> QuerySet:
+def v2_name_filter(queryset: QuerySet, name: str, field: str = "name", extra_filters: dict | None = None) -> QuerySet:
     """Filter a queryset by name with '*' glob support.
 
     Without wildcards, performs case-insensitive substring match.
     With '*' wildcards, converts to regex for pattern matching.
     A bare '*' matches everything (no filter applied).
+
+    extra_filters, when given, are merged into the same filter() call so they constrain the
+    same joined row as the name lookup (rather than an independently-joined row).
     """
     if name == "*":
         return queryset
+    extra_filters = extra_filters or {}
     if "*" in name:
-        return queryset.filter(**{f"{field}__iregex": _glob_to_regex(name)})
-    return queryset.filter(**{f"{field}__icontains": name})
+        return queryset.filter(**{f"{field}__iregex": _glob_to_regex(name)}, **extra_filters)
+    return queryset.filter(**{f"{field}__icontains": name}, **extra_filters)

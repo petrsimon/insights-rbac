@@ -88,13 +88,26 @@ class GroupV2Service:
 
         # Filters traversing principals or role bindings join multi-valued relations, so .distinct() prevents
         # duplicate groups. The count annotations use Count(distinct=True) and are unaffected by the extra joins.
+        # All principal-based filters restrict to Principal.Types.USER to match principal_count_annotation --
+        # service accounts share the username field but are excluded from that count.
         username = params.get("username")
         if username:
-            queryset = v2_name_filter(queryset, username, field="principals__username").distinct()
+            queryset = v2_name_filter(
+                queryset,
+                username,
+                field="principals__username",
+                extra_filters={"principals__type": Principal.Types.USER},
+            ).distinct()
 
         exclude_username = params.get("exclude_username")
         if exclude_username:
-            queryset = queryset.exclude(principals__username__icontains=exclude_username)
+            # exclude() on a multi-valued relation ANDs conditions across independently-matched rows
+            # rather than requiring a single row to satisfy both (unlike filter()), so the type and
+            # username conditions are combined here via a Principal subquery instead.
+            matching_principals = Principal.objects.filter(
+                tenant=self.tenant, type=Principal.Types.USER, username__icontains=exclude_username
+            ).values("pk")
+            queryset = queryset.exclude(principals__in=matching_principals)
 
         role_names = params.get("role_names")
         if role_names:
@@ -102,13 +115,18 @@ class GroupV2Service:
             queryset = self._filter_by_role_names(queryset, role_names, discriminator)
 
         # Chain one filter per principal so a group must contain all of them.
-        for principal in params.get("principals") or ():
-            queryset = queryset.filter(principals__username__iexact=principal).distinct()
+        principals = params.get("principals") or ()
+        for principal in principals:
+            queryset = queryset.filter(principals__type=Principal.Types.USER, principals__username__iexact=principal)
+        if principals:
+            queryset = queryset.distinct()
 
         if params.get("scope") == self.PRINCIPAL_SCOPE:
             if not requester_username:
                 return queryset.none()
-            queryset = queryset.filter(principals__username__iexact=requester_username).distinct()
+            queryset = queryset.filter(
+                principals__type=Principal.Types.USER, principals__username__iexact=requester_username
+            ).distinct()
 
         for flag in ("system", "platform_default", "admin_default"):
             value = params.get(flag)
@@ -182,8 +200,8 @@ class GroupV2Service:
             for role_name in role_names:
                 queryset = queryset.filter(
                     tenant_bindings, role_binding_entries__binding__role__name__iexact=role_name
-                ).distinct()
-            return queryset
+                )
+            return queryset.distinct()
 
         any_role = Q()
         for role_name in role_names:
