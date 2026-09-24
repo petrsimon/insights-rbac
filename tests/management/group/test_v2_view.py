@@ -262,6 +262,244 @@ class GroupV2ListViewTest(GroupV2ViewTestBase):
         self.assertEqual(self.mock_check_access.call_args.kwargs["relation"], "rbac_groups_read")
 
 
+class GroupV2ListAdvancedFiltersViewTest(GroupV2ViewTestBase):
+    """Tests for the role-based and principal-based group list filters."""
+
+    def setUp(self):
+        """Set up role bindings: alpha has role_1 and role_2 (role_2 on two workspaces), beta has role_2."""
+        super().setUp()
+        self._bind(self.group_a, self.role_1, "ws-1")
+        self._bind(self.group_a, self.role_2, "ws-1")
+        self._bind(self.group_a, self.role_2, "ws-2")
+        self._bind(self.group_b, self.role_2, "ws-3")
+
+    def _other_tenant(self):
+        return self.tenant.__class__.objects.create(tenant_name="other", org_id="other-org")
+
+    def test_filter_by_username_substring(self):
+        """username matches groups with a member whose username contains the value."""
+        response = self._list(username="user_2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+
+    def test_filter_by_username_returns_distinct_groups(self):
+        """A group with several matching members is returned once."""
+        response = self._list(username="user")
+
+        self.assertEqual(self._names(response), ["alpha", "beta"])
+        self.assertEqual(response.json()["meta"]["count"], 2)
+
+    def test_filter_by_username_glob(self):
+        """username supports '*' glob patterns."""
+        response = self._list(username="service-*")
+
+        self.assertEqual(self._names(response), ["alpha"])
+
+    def test_filter_by_blank_username_is_ignored(self):
+        """A blank username does not filter."""
+        response = self._list(username="")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._tenant_group_names(response), ["alpha", "beta"])
+
+    def test_filter_by_exclude_username(self):
+        """exclude_username drops groups with a member whose username contains the value."""
+        response = self._list(exclude_username="user_2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._tenant_group_names(response), ["beta"])
+
+    def test_filter_by_exclude_username_keeps_groups_without_members_once(self):
+        """Groups with no or several non-matching members are returned exactly once."""
+        empty = Group.objects.create(name="empty", tenant=self.tenant)
+        other = Group.objects.create(name="other", tenant=self.tenant)
+        other.principals.add(
+            Principal.objects.create(username="carol", tenant=self.tenant),
+            Principal.objects.create(username="dave", tenant=self.tenant),
+        )
+
+        response = self._list(exclude_username="user", uuid=f"{self.group_a.uuid},{empty.uuid},{other.uuid}")
+
+        self.assertEqual(self._names(response), ["empty", "other"])
+        self.assertEqual(response.json()["meta"]["count"], 2)
+
+    def test_username_and_exclude_username_are_mutually_exclusive(self):
+        """Supplying both username and exclude_username is rejected with 400 Problem JSON."""
+        response = self._list(username="user_1", exclude_username="user_2")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response["Content-Type"], "application/problem+json")
+        error = response.json()["errors"][0]
+        self.assertEqual(error["field"], "exclude_username")
+        self.assertEqual(error["message"], "username and exclude_username are mutually exclusive.")
+
+    def test_blank_username_with_exclude_username_is_allowed(self):
+        """A blank username does not conflict with exclude_username."""
+        response = self._list(username="", exclude_username="user_2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._tenant_group_names(response), ["beta"])
+
+    def test_filter_by_role_names_any(self):
+        """role_names defaults to 'any' and returns each matching group once."""
+        response = self._list(role_names="role_1,role_2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha", "beta"])
+        self.assertEqual(response.json()["meta"]["count"], 2)
+
+        response = self._list(role_names="role_1", role_discriminator="any")
+        self.assertEqual(self._names(response), ["alpha"])
+
+    def test_filter_by_role_names_all(self):
+        """role_discriminator=all requires every named role."""
+        response = self._list(role_names="role_1,role_2", role_discriminator="all")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+
+    def test_filter_by_role_names_is_case_insensitive_exact_match(self):
+        """Role names match case-insensitively but not as substrings."""
+        response = self._list(role_names=" ROLE_1 ")
+        self.assertEqual(self._names(response), ["alpha"])
+
+        response = self._list(role_names="role")
+        self.assertEqual(self._names(response), [])
+
+    def test_filter_by_role_names_keeps_counts(self):
+        """Filtering by roles does not inflate the principal and role count annotations."""
+        response = self._list(role_names="role_1,role_2", role_discriminator="all")
+
+        group = response.json()["data"][0]
+        self.assertEqual(group["principal_count"], 2)
+        self.assertEqual(group["role_count"], 2)
+
+    def test_filter_by_empty_role_names_is_ignored(self):
+        """A role_names value with no names does not filter."""
+        response = self._list(role_names=" , ")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._tenant_group_names(response), ["alpha", "beta"])
+
+    def test_role_discriminator_without_role_names_is_ignored(self):
+        """role_discriminator alone does not filter."""
+        response = self._list(role_discriminator="all")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._tenant_group_names(response), ["alpha", "beta"])
+
+    def test_invalid_role_discriminator(self):
+        """Unknown role_discriminator values are rejected."""
+        response = self._list(role_names="role_1", role_discriminator="some")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["errors"][0]["field"], "role_discriminator")
+
+    def test_filter_by_principals_requires_all(self):
+        """principals returns only groups containing every named principal."""
+        response = self._list(principals="user_1,USER_2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+
+        response = self._list(principals="user_1")
+        self.assertEqual(self._names(response), ["alpha", "beta"])
+
+    def test_filter_by_principals_is_exact_match(self):
+        """principals does not match username substrings."""
+        response = self._list(principals="user")
+
+        self.assertEqual(self._names(response), [])
+
+    def test_filter_by_principals_keeps_counts(self):
+        """Filtering by principals does not inflate the principal and role count annotations."""
+        response = self._list(principals="user_1,user_2")
+
+        group = response.json()["data"][0]
+        self.assertEqual(group["principal_count"], 2)
+        self.assertEqual(group["role_count"], 2)
+
+    def test_filter_by_empty_principals_is_ignored(self):
+        """A principals value with no usernames does not filter."""
+        response = self._list(principals=",")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._tenant_group_names(response), ["alpha", "beta"])
+
+    def test_scope_principal_returns_requester_groups(self):
+        """scope=principal returns only groups the calling user belongs to."""
+        requester = Principal.objects.create(username=self.user_data["username"], tenant=self.tenant)
+        self.group_b.principals.add(requester)
+
+        response = self._list(scope="principal")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["beta"])
+
+    def test_scope_principal_without_membership_returns_nothing(self):
+        """scope=principal returns no groups when the calling user belongs to none."""
+        response = self._list(scope="principal")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), [])
+
+    def test_scope_org_id_returns_all_groups(self):
+        """scope=org_id (the default) does not filter."""
+        response = self._list(scope="org_id")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(self._tenant_group_names(response), ["alpha", "beta"])
+
+    def test_invalid_scope(self):
+        """Unknown scope values are rejected."""
+        response = self._list(scope="account")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["errors"][0]["field"], "scope")
+
+    def test_role_names_combined_with_order_by(self):
+        """role_names narrows the result set and order_by still sorts the matching groups."""
+        response = self._list(role_names="role_2", order_by="principal_count")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["beta", "alpha"])
+
+        response = self._list(role_names="role_2", order_by="-principal_count")
+        self.assertEqual(self._names(response), ["alpha", "beta"])
+
+    def test_principals_combined_with_role_names(self):
+        """Principal and role filters apply together."""
+        response = self._list(principals="user_1", role_names="role_1")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._names(response), ["alpha"])
+
+    def test_filters_exclude_other_tenant_groups(self):
+        """Principal and role filters never return another tenant's groups."""
+        other_tenant = self._other_tenant()
+        other_group = Group.objects.create(name="alpha-other", tenant=other_tenant)
+        other_group.principals.add(Principal.objects.create(username="user_1", tenant=other_tenant))
+        other_group.principals.add(Principal.objects.create(username=self.user_data["username"], tenant=other_tenant))
+        other_role = CustomRoleV2.objects.create(name="role_1", tenant=other_tenant)
+        other_binding = RoleBinding.objects.create(
+            role=other_role, resource_type="workspace", resource_id="ws-1", tenant=other_tenant
+        )
+        RoleBindingGroup.objects.create(group=other_group, binding=other_binding)
+
+        cases = (
+            {"username": "user_1"},
+            {"principals": "user_1"},
+            {"role_names": "role_1"},
+            {"role_names": "role_1", "role_discriminator": "all"},
+            {"scope": "principal"},
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                response = self._list(**params)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertNotIn("alpha-other", self._names(response))
+
+
 class GroupV2RetrieveViewTest(GroupV2ViewTestBase):
     """Tests for retrieving a group."""
 

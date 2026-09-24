@@ -27,6 +27,11 @@ RESERVED_GROUP_NAMES = {"custom default access", "default access"}
 VALID_ORDER_BY_FIELDS = {prefix + field for field in GroupV2Service.ORDER_BY_FIELD_MAPPING for prefix in ("", "-")}
 
 
+def _split_csv(value: str) -> list[str] | None:
+    """Split a comma-separated value, ignoring blank entries. Returns None when no entries remain."""
+    return [item for item in (v.strip() for v in value.split(",")) if item] or None
+
+
 class GroupV2ResponseSerializer(serializers.ModelSerializer):
     """Output serializer for the Group V2 API."""
 
@@ -75,6 +80,40 @@ class GroupV2ListInputSerializer(serializers.Serializer):
         allow_blank=True,
         help_text="Filter by comma-separated group UUIDs.",
     )
+    username = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Filter groups with a member username matching the value. Substring match; use * for globs.",
+    )
+    exclude_username = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Exclude groups with a member username containing the value. Mutually exclusive with username.",
+    )
+    role_names = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Filter groups by comma-separated role names. Use role_discriminator to control match logic.",
+    )
+    role_discriminator = serializers.ChoiceField(
+        choices=GroupV2Service.ROLE_DISCRIMINATORS,
+        required=False,
+        allow_blank=True,
+        default=GroupV2Service.ROLE_DISCRIMINATOR_ANY,
+        help_text="Match groups with 'any' (default) or 'all' of the role_names.",
+    )
+    principals = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Filter groups containing all of the comma-separated principal usernames.",
+    )
+    scope = serializers.ChoiceField(
+        choices=GroupV2Service.SCOPES,
+        required=False,
+        allow_blank=True,
+        default=GroupV2Service.ORG_ID_SCOPE,
+        help_text="'org_id' (default) returns all groups; 'principal' returns only the requester's groups.",
+    )
     system = serializers.BooleanField(required=False, allow_null=True, default=None)
     platform_default = serializers.BooleanField(required=False, allow_null=True, default=None)
     admin_default = serializers.BooleanField(required=False, allow_null=True, default=None)
@@ -85,13 +124,23 @@ class GroupV2ListInputSerializer(serializers.Serializer):
     )
 
     validate_name = staticmethod(normalize_blank_or_none)
+    validate_username = staticmethod(normalize_blank_or_none)
+    validate_exclude_username = staticmethod(normalize_blank_or_none)
+    validate_role_names = staticmethod(_split_csv)
+    validate_principals = staticmethod(_split_csv)
+
+    def validate_role_discriminator(self, value):
+        """Map a blank role_discriminator to the default."""
+        return value or GroupV2Service.ROLE_DISCRIMINATOR_ANY
+
+    def validate_scope(self, value):
+        """Map a blank scope to the default."""
+        return value or GroupV2Service.ORG_ID_SCOPE
 
     def validate_uuid(self, value):
         """Parse comma-separated UUIDs, ignoring empty entries. Returns None when no UUIDs remain."""
         uuids = []
-        for item in (v.strip() for v in value.split(",")):
-            if not item:
-                continue
+        for item in _split_csv(value) or ():
             try:
                 uuids.append(UUID(item))
             except ValueError:
@@ -107,3 +156,11 @@ class GroupV2ListInputSerializer(serializers.Serializer):
                 f"Invalid order_by value '{value}'. Valid values: {', '.join(sorted(VALID_ORDER_BY_FIELDS))}"
             )
         return value
+
+    def validate(self, attrs):
+        """Reject username and exclude_username supplied together."""
+        if attrs.get("username") and attrs.get("exclude_username"):
+            raise serializers.ValidationError(
+                {"exclude_username": "username and exclude_username are mutually exclusive."}
+            )
+        return attrs

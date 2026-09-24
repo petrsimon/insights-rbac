@@ -17,7 +17,7 @@
 """Service layer for GroupV2."""
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, ProtectedError, Q, QuerySet
@@ -47,6 +47,12 @@ class GroupV2Service:
     }
     PROTECTED_FLAGS_FOR_UPDATE = ("system",)
     PROTECTED_FLAGS_FOR_DELETE = ("system", "platform_default", "admin_default")
+    ORG_ID_SCOPE = "org_id"
+    PRINCIPAL_SCOPE = "principal"
+    SCOPES = (ORG_ID_SCOPE, PRINCIPAL_SCOPE)
+    ROLE_DISCRIMINATOR_ANY = "any"
+    ROLE_DISCRIMINATOR_ALL = "all"
+    ROLE_DISCRIMINATORS = (ROLE_DISCRIMINATOR_ANY, ROLE_DISCRIMINATOR_ALL)
 
     def __init__(self, tenant: Tenant):
         """Initialize service with tenant context."""
@@ -65,8 +71,11 @@ class GroupV2Service:
             ),
         )
 
-    def list(self, params: dict) -> QuerySet:
-        """List groups with optional filtering and ordering."""
+    def list(self, params: dict, requester_username: Optional[str] = None) -> QuerySet:
+        """List groups with optional filtering and ordering.
+
+        requester_username is required for scope=principal, which returns only the requester's groups.
+        """
         queryset = self.queryset()
 
         name = params.get("name")
@@ -76,6 +85,30 @@ class GroupV2Service:
         uuids = params.get("uuid")
         if uuids:
             queryset = queryset.filter(uuid__in=uuids)
+
+        # Filters traversing principals or role bindings join multi-valued relations, so .distinct() prevents
+        # duplicate groups. The count annotations use Count(distinct=True) and are unaffected by the extra joins.
+        username = params.get("username")
+        if username:
+            queryset = v2_name_filter(queryset, username, field="principals__username").distinct()
+
+        exclude_username = params.get("exclude_username")
+        if exclude_username:
+            queryset = queryset.exclude(principals__username__icontains=exclude_username)
+
+        role_names = params.get("role_names")
+        if role_names:
+            discriminator = params.get("role_discriminator", self.ROLE_DISCRIMINATOR_ANY)
+            queryset = self._filter_by_role_names(queryset, role_names, discriminator)
+
+        # Chain one filter per principal so a group must contain all of them.
+        for principal in params.get("principals") or ():
+            queryset = queryset.filter(principals__username__iexact=principal).distinct()
+
+        if params.get("scope") == self.PRINCIPAL_SCOPE:
+            if not requester_username:
+                return queryset.none()
+            queryset = queryset.filter(principals__username__iexact=requester_username).distinct()
 
         for flag in ("system", "platform_default", "admin_default"):
             value = params.get(flag)
@@ -139,6 +172,23 @@ class GroupV2Service:
             raise GroupHasRoleBindingsError(len(e.protected_objects))
 
         dual_write_handler.replicate_removed_principals(principals)
+
+    def _filter_by_role_names(self, queryset: QuerySet, role_names: Sequence[str], discriminator: str) -> QuerySet:
+        """Filter groups bound to any (default) or all of the given role names, matched case-insensitively."""
+        # Only count bindings in the group's own tenant, matching role_count_annotation.
+        tenant_bindings = Q(role_binding_entries__binding__tenant=F("tenant"))
+        if discriminator == self.ROLE_DISCRIMINATOR_ALL:
+            # Each chained filter() joins the bindings anew, so every role name must match some binding.
+            for role_name in role_names:
+                queryset = queryset.filter(
+                    tenant_bindings, role_binding_entries__binding__role__name__iexact=role_name
+                ).distinct()
+            return queryset
+
+        any_role = Q()
+        for role_name in role_names:
+            any_role |= Q(role_binding_entries__binding__role__name__iexact=role_name)
+        return queryset.filter(tenant_bindings, any_role).distinct()
 
     def _ordering(self, order_by: str) -> tuple[str, ...]:
         """Translate an API order_by value into ORM ordering, with a stable name/uuid tiebreaker."""

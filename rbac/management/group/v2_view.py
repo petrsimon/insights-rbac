@@ -65,7 +65,9 @@ class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
         input_serializer = GroupV2ListInputSerializer(data=request.query_params)
         input_serializer.is_valid(raise_exception=True)
 
-        queryset = GroupV2Service(tenant=request.tenant).list(input_serializer.validated_data)
+        queryset = GroupV2Service(tenant=request.tenant).list(
+            input_serializer.validated_data, requester_username=request.user.username
+        )
 
         page = self.paginate_queryset(queryset)
         serializer = GroupV2ResponseSerializer(page, many=True)
