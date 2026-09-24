@@ -17,14 +17,24 @@
 """View for GroupV2 management."""
 
 import logging
+from functools import wraps
 
 from django.db import transaction
 from management.atomic_transactions import atomic_block
 from management.audit_log.model import AuditLog
 from management.base_viewsets import BaseV2ViewSet
-from management.group.v2_exceptions import GroupAlreadyExistsError, GroupHasRoleBindingsError, ProtectedGroupError
+from management.group.relation_api_dual_write_group_handler import RelationApiDualWriteGroupHandler
+from management.group.v2_exceptions import (
+    GroupAlreadyExistsError,
+    GroupHasRoleBindingsError,
+    PrincipalNotFoundError,
+    ProtectedGroupError,
+)
 from management.group.v2_serializer import (
+    GroupV2AddPrincipalsInputSerializer,
     GroupV2ListInputSerializer,
+    GroupV2ListPrincipalsInputSerializer,
+    GroupV2RemovePrincipalsInputSerializer,
     GroupV2RequestSerializer,
     GroupV2ResponseSerializer,
 )
@@ -32,14 +42,32 @@ from management.group.v2_service import GroupV2Service
 from management.notifications.notification_handlers import group_obj_change_notification_handler
 from management.permissions.group_v2_access import GroupV2KesselAccessPermission
 from management.permissions.v2_edit_api_access import V2WriteRequiresWorkspacesEnabled
+from management.principal.v2_serializer import PrincipalV2OutputSerializer
+from management.relation_replicator.relation_replicator import ReplicationEventType
 from management.utils import v2response_error_from_errors
 from management.v2_mixins import AtomicOperationsMixin
 from rest_framework import status
+from rest_framework.decorators import action
 from rest_framework.response import Response
 
 logger = logging.getLogger(__name__)
 
 ALREADY_EXISTS_PROBLEM_TYPE = "http://project-kessel.org/problems/already-exists"
+
+
+def _catch_principal_errors(fn):
+    """Translate ProtectedGroupError/PrincipalNotFoundError into their HTTP error responses."""
+
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except ProtectedGroupError as e:
+            return self._error_response(e, status.HTTP_400_BAD_REQUEST)
+        except PrincipalNotFoundError as e:
+            return self._error_response(e, status.HTTP_404_NOT_FOUND)
+
+    return wrapper
 
 
 class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
@@ -138,6 +166,99 @@ class GroupV2ViewSet(AtomicOperationsMixin, BaseV2ViewSet):
 
         self._log_success(request, "V2 Group deleted", "DELETE", group)
         self._send_notification(request, group, "deleted")
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["get", "post", "delete"], url_path="principals")
+    def principals(self, request, uuid=None):
+        """List, bulk-add, or bulk-remove a group's member principals, dispatched by HTTP method."""
+        if request.method == "GET":
+            return self._list_principals(request, uuid)
+        if request.method == "POST":
+            return self._atomic_action(self._perform_add_principals, "add_principals", request, uuid=uuid)
+        return self._atomic_action(self._perform_remove_principals_bulk, "remove_principals_bulk", request, uuid=uuid)
+
+    @action(detail=True, methods=["delete"], url_path=r"principals/(?P<principal_uuid>[0-9a-f-]+)")
+    def remove_principal(self, request, uuid=None, principal_uuid=None):
+        """Remove a single principal from a group by principal UUID."""
+        return self._atomic_action(
+            self._perform_remove_principal, "remove_principal", request, uuid=uuid, principal_uuid=principal_uuid
+        )
+
+    def _list_principals(self, request, uuid=None):
+        """List the group's member principals with optional filtering."""
+        group = self.get_object()
+        input_serializer = GroupV2ListPrincipalsInputSerializer(data=request.query_params)
+        input_serializer.is_valid(raise_exception=True)
+
+        service = GroupV2Service(tenant=request.tenant)
+        queryset = service.list_principals(group, input_serializer.validated_data)
+
+        page = self.paginate_queryset(queryset)
+        serializer = PrincipalV2OutputSerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @_catch_principal_errors
+    def _perform_add_principals(self, request, uuid=None):
+        """Add principals to a group and return the full group representation."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+            serializer = GroupV2AddPrincipalsInputSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            usernames = set(serializer.validated_data.get("usernames") or [])
+            service_accounts = set(serializer.validated_data.get("service_accounts") or [])
+
+            principals = service.add_principals(group, usernames, service_accounts)
+
+            dual_write_handler = RelationApiDualWriteGroupHandler(group, ReplicationEventType.ADD_PRINCIPALS_TO_GROUP)
+            dual_write_handler.replicate_new_principals(principals)
+
+            for principal in principals:
+                audit_log = AuditLog()
+                audit_log.log_group_assignment(request, AuditLog.GROUP_V2, group, principal, principal.type)
+
+        return Response(GroupV2ResponseSerializer(service.get(group)).data, status=status.HTTP_200_OK)
+
+    @_catch_principal_errors
+    def _perform_remove_principals_bulk(self, request, uuid=None):
+        """Remove principals from a group in bulk. All identifiers must resolve, or nothing is removed."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+            serializer = GroupV2RemovePrincipalsInputSerializer(data=request.query_params)
+            serializer.is_valid(raise_exception=True)
+            usernames = set(serializer.validated_data.get("usernames") or [])
+            service_accounts = set(serializer.validated_data.get("service_accounts") or [])
+
+            principals = service.remove_principals(group, usernames, service_accounts)
+
+            dual_write_handler = RelationApiDualWriteGroupHandler(
+                group, ReplicationEventType.REMOVE_PRINCIPALS_FROM_GROUP
+            )
+            dual_write_handler.replicate_removed_principals(principals)
+
+            for principal in principals:
+                audit_log = AuditLog()
+                audit_log.log_group_remove(request, AuditLog.GROUP_V2, group, principal, principal.type)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @_catch_principal_errors
+    def _perform_remove_principal(self, request, uuid=None, principal_uuid=None):
+        """Remove a single principal from a group by principal UUID."""
+        service = GroupV2Service(tenant=request.tenant)
+        with atomic_block():
+            group = self.get_object()
+            principal = service.remove_principal(group, principal_uuid)
+
+            dual_write_handler = RelationApiDualWriteGroupHandler(
+                group, ReplicationEventType.REMOVE_PRINCIPALS_FROM_GROUP
+            )
+            dual_write_handler.replicate_removed_principals([principal])
+
+            audit_log = AuditLog()
+            audit_log.log_group_remove(request, AuditLog.GROUP_V2, group, principal, principal.type)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 

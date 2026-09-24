@@ -42,12 +42,18 @@ class GroupV2KesselAccessPermission(permissions.BasePermission):
     RESOURCE_TYPE = "tenant"
     GROUPS_READ_RELATION = "rbac_groups_read"
     GROUPS_WRITE_RELATION = "rbac_groups_write"
-    WRITE_ACTIONS = {"create", "update", "destroy"}
+    WRITE_ACTIONS = {"create", "update", "destroy", "remove_principal"}
+    # The "principals" action serves GET (read), POST and DELETE (write) on the same route,
+    # so it cannot be classified by action name alone.
+    MIXED_METHOD_WRITE_ACTIONS = {"principals": {"POST", "DELETE"}}
 
-    def _get_relation(self, view) -> str:
-        """Get the relation to check based on the view action."""
-        action = getattr(view, "action", None)
+    def _get_relation(self, view, request=None) -> str:
+        """Get the relation to check based on the view action (and, for mixed-method actions, the HTTP method)."""
+        action = getattr(view, "action", "") or ""
         if action in self.WRITE_ACTIONS:
+            return self.GROUPS_WRITE_RELATION
+        write_methods = self.MIXED_METHOD_WRITE_ACTIONS.get(action)
+        if write_methods and getattr(request, "method", None) in write_methods:
             return self.GROUPS_WRITE_RELATION
         return self.GROUPS_READ_RELATION
 
@@ -77,7 +83,7 @@ class GroupV2KesselAccessPermission(permissions.BasePermission):
             logger.debug("Denied group access: could not determine principal ID")
             return False
 
-        relation = self._get_relation(view)
+        relation = self._get_relation(view, request)
         checker = WorkspaceInventoryAccessChecker()
         has_access = checker.check_resource_access(
             resource_type=self.RESOURCE_TYPE,
